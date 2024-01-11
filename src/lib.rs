@@ -55,7 +55,7 @@ pub type JrpcResult = Result<JsonRpcResponse, JsonRpcResponse>;
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct JsonRpcRequest {
-    pub id: i64,
+    pub id: Id,
     pub jsonrpc: String,
     pub method: String,
     pub params: Value,
@@ -82,12 +82,12 @@ pub struct JsonRpcRequest {
 pub struct JsonRpcExtractor {
     pub parsed: Value,
     pub method: String,
-    pub id: i64,
+    pub id: Id,
 }
 
 impl JsonRpcExtractor {
-    pub fn get_answer_id(&self) -> i64 {
-        self.id
+    pub fn get_answer_id(&self) -> Id {
+        self.id.clone()
     }
 
     pub fn parse_params<T: DeserializeOwned>(self) -> Result<T, JsonRpcResponse> {
@@ -116,7 +116,7 @@ impl JsonRpcExtractor {
             Value::Null,
         );
 
-        JsonRpcResponse::error(self.id, error)
+        JsonRpcResponse::error(self.id.clone(), error)
     }
 }
 
@@ -135,8 +135,7 @@ where
             Ok(a) => a.0,
             Err(e) => {
                 return Err(JsonRpcResponse {
-                    id: 0,
-                    jsonrpc: "2.0".to_owned(),
+                    id: Id::Num(0),
                     result: JsonRpcAnswer::Error(JsonRpcError::new(
                         JsonRpcErrorReason::InvalidRequest,
                         e.to_string(),
@@ -148,7 +147,6 @@ where
         if parsed.jsonrpc != "2.0" {
             return Err(JsonRpcResponse {
                 id: parsed.id,
-                jsonrpc: "2.0".to_owned(),
                 result: JsonRpcAnswer::Error(JsonRpcError::new(
                     JsonRpcErrorReason::InvalidRequest,
                     "Invalid jsonrpc version".to_owned(),
@@ -164,26 +162,50 @@ where
     }
 }
 
-#[derive(Serialize, Debug, Deserialize, PartialEq, Eq)]
+/// An identifier established by the Client that MUST contain a String, Number,
+/// or NULL value if included. If it is not included it is assumed to be a notification.
+/// The value SHOULD normally not be Null and Numbers SHOULD NOT contain fractional parts
+#[derive(Clone, Eq, PartialEq, Debug, Serialize, Deserialize, Hash)]
+#[serde(untagged)]
+pub enum Id {
+    Num(i64),
+    Str(String),
+    None(()),
+}
+
+impl From<()> for Id {
+    fn from(val: ()) -> Self {
+        Id::None(val)
+    }
+}
+
+impl From<i64> for Id {
+    fn from(val: i64) -> Self {
+        Id::Num(val)
+    }
+}
+
+impl From<String> for Id {
+    fn from(val: String) -> Self {
+        Id::Str(val)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
 /// A JSON-RPC response.
 pub struct JsonRpcResponse {
-    jsonrpc: String,
     pub result: JsonRpcAnswer,
     /// The request ID.
-    id: i64,
+    id: Id,
 }
 
 impl JsonRpcResponse {
-    fn new(id: i64, result: JsonRpcAnswer) -> Self {
-        Self {
-            jsonrpc: "2.0".to_owned(),
-            result,
-            id,
-        }
+    fn new(id: Id, result: JsonRpcAnswer) -> Self {
+        Self { result, id }
     }
     /// Returns a response with the given result
     /// Returns JsonRpcError if the `result` is invalid input for [`serde_json::to_value`]
-    pub fn success<T: Serialize>(id: i64, result: T) -> Self {
+    pub fn success<T: Serialize>(id: Id, result: T) -> Self {
         let result = match serde_json::to_value(result) {
             Ok(v) => v,
             Err(e) => {
@@ -199,12 +221,33 @@ impl JsonRpcResponse {
         JsonRpcResponse::new(id, JsonRpcAnswer::Result(result))
     }
 
-    pub fn error(id: i64, error: JsonRpcError) -> Self {
+    pub fn error(id: Id, error: JsonRpcError) -> Self {
         JsonRpcResponse {
-            jsonrpc: "2.0".to_owned(),
             result: JsonRpcAnswer::Error(error),
             id,
         }
+    }
+}
+
+impl Serialize for JsonRpcResponse {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        #[derive(Serialize)]
+        struct Helper<'a> {
+            jsonrpc: &'static str,
+            #[serde(flatten)]
+            result: &'a JsonRpcAnswer,
+            id: &'a Id,
+        }
+
+        Helper {
+            jsonrpc: JSONRPC,
+            result: &self.result,
+            id: &self.id,
+        }
+        .serialize(serializer)
     }
 }
 
@@ -214,13 +257,15 @@ impl IntoResponse for JsonRpcResponse {
     }
 }
 
-#[derive(Serialize, Debug, Deserialize, PartialEq, Eq)]
-#[serde(untagged)]
+#[derive(Serialize, Clone, Debug, Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
 /// JsonRpc [response object](https://www.jsonrpc.org/specification#response_object)
 pub enum JsonRpcAnswer {
     Result(Value),
     Error(JsonRpcError),
 }
+
+const JSONRPC: &str = "2.0";
 
 #[cfg(test)]
 #[cfg(feature = "anyhow_error")]
